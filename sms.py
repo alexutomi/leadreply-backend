@@ -1,21 +1,16 @@
-from twilio.twiml.messaging_response import MessagingResponse
-from model import get_ai_reply
+from twilio.rest import Client
+import os
 
-def handle_sms(form):
-    incoming_text = form.get("Body")
-    sender_number = form.get("From")
+account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    print(f"Incoming SMS from {sender_number}: {incoming_text}")  # debug
+client = Client(account_sid, auth_token)
 
-    try:
-        ai_reply = get_ai_reply(sender_number, incoming_text)
-        print(f"AI reply: {ai_reply}")  # debug
-    except Exception as e:
-        print(f"Error generating AI reply: {e}")
-        ai_reply = "Sorry, something went wrong. Please try again."
 
-    response = MessagingResponse()
-    response.message(ai_reply)
+def send_missed_call_text(to_number, from_number):
 
-    # This works for Twilio
-    return str(response)
+    client.messages.create(
+        to=to_number,
+        from_=from_number,
+        body="Hi! Sorry we missed your call. How can we help you today?"
+    )

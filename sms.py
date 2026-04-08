@@ -16,3 +16,6 @@ def handle_sms(form):
 
     response = MessagingResponse()
     response.message(ai_reply)
+
+# This works for Twilio
+    return str(response)

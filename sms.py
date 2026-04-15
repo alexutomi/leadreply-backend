@@ -25,7 +25,6 @@ PLAN_LIMITS = {
     "agency_pro":     999999,
 }
 
-# Message sent when a business exceeds their monthly limit
 LIMIT_REACHED_MESSAGE = (
     "Hi! Sorry we missed your call. "
     "Please call us back directly and we will be happy to help you. "
@@ -35,10 +34,6 @@ LIMIT_REACHED_MESSAGE = (
 
 # ── LOOKUP BUSINESS BY TWILIO NUMBER ──────────────────────
 def get_business_by_number(twilio_number: str):
-    """
-    Finds the business that owns this Twilio number.
-    Returns (business, ai_profile) or (None, None).
-    """
     try:
         biz_result = sb.table("businesses") \
             .select("*") \
@@ -65,48 +60,57 @@ def get_business_by_number(twilio_number: str):
         return None, None
 
 
+# ── LOG CONVERSATION ──────────────────────────────────────
+def log_message(business_id: str, caller_number: str, direction: str, message: str):
+    """
+    Logs every inbound and outbound SMS to the conversations table.
+    direction: 'inbound' (from customer) or 'outbound' (auto-reply sent)
+    """
+    try:
+        sb.table("conversations").insert({
+            "business_id":   business_id,
+            "caller_number": caller_number,
+            "direction":     direction,
+            "message":       message
+        }).execute()
+        print(f"📝 Logged {direction} message for {caller_number}")
+    except Exception as e:
+        print(f"⚠️ Error logging message: {e}")
+
+
 # ── CHECK AND RESET SMS LIMIT ─────────────────────────────
 def check_sms_limit(business: dict) -> bool:
-    """
-    Returns True if the business can still send SMS this month.
-    Returns False if they have hit their plan limit.
-    Also resets the counter if a new month has started.
-    """
     plan       = business.get("plan", "starter")
     sms_count  = business.get("sms_count", 0) or 0
     reset_date = business.get("sms_reset_date")
     limit      = PLAN_LIMITS.get(plan, 500)
 
-    # Check if we need to reset the monthly counter
     today = date.today()
     if reset_date:
         try:
             reset = date.fromisoformat(str(reset_date))
             if today.month != reset.month or today.year != reset.year:
-                # New month — reset the counter
                 sb.table("businesses").update({
                     "sms_count":      0,
                     "sms_reset_date": today.isoformat()
                 }).eq("id", business["id"]).execute()
-                print(f"🔄 SMS count reset for {business['business_name']} — new month")
+                print(f"🔄 SMS count reset for {business['business_name']}")
                 return True
         except Exception as e:
             print(f"⚠️ Error parsing reset date: {e}")
 
-    # Check if under limit
     if limit == 999999:
-        return True  # Unlimited plan
+        return True
 
     if sms_count < limit:
         return True
 
-    print(f"⚠️ SMS limit reached for {business['business_name']} — {sms_count}/{limit} used")
+    print(f"⚠️ SMS limit reached for {business['business_name']} — {sms_count}/{limit}")
     return False
 
 
 # ── INCREMENT SMS COUNT ───────────────────────────────────
 def increment_sms_count(business: dict):
-    """Adds 1 to the business SMS counter after sending."""
     try:
         current = business.get("sms_count", 0) or 0
         sb.table("businesses") \
@@ -119,10 +123,6 @@ def increment_sms_count(business: dict):
 
 # ── HANDLE INBOUND SMS ────────────────────────────────────
 def handle_sms(form):
-    """
-    Customer texts the Twilio number.
-    Checks plan limit before generating AI reply.
-    """
     incoming_text = form.get("Body")
     sender_number = form.get("From")
     called_number = form.get("To")
@@ -132,15 +132,16 @@ def handle_sms(form):
     business, profile = get_business_by_number(called_number)
 
     if business:
-        print(f"✅ Business found: {business['business_name']} — Plan: {business.get('plan', 'starter')}")
+        print(f"✅ Business: {business['business_name']} — Plan: {business.get('plan','starter')}")
+        # Log the inbound message
+        log_message(business["id"], sender_number, "inbound", incoming_text)
     else:
         print("⚠️ No business found — using default prompt")
 
     try:
-        # Check SMS limit
         if business and not check_sms_limit(business):
             ai_reply = LIMIT_REACHED_MESSAGE
-            print(f"🚫 SMS limit reached — sending fallback message")
+            print("🚫 SMS limit reached — sending fallback")
         else:
             ai_reply = get_ai_reply(
                 sender_number,
@@ -149,10 +150,12 @@ def handle_sms(form):
                 business=business
             )
             print(f"🤖 AI reply: {ai_reply}")
-
-            # Increment counter
             if business:
                 increment_sms_count(business)
+
+        # Log the outbound reply
+        if business:
+            log_message(business["id"], sender_number, "outbound", ai_reply)
 
     except Exception as e:
         print(f"❌ Error generating AI reply: {e}")
@@ -165,10 +168,6 @@ def handle_sms(form):
 
 # ── HANDLE MISSED CALL ────────────────────────────────────
 def handle_missed_call(form):
-    """
-    Customer calls and nobody answers.
-    Checks plan limit before sending auto SMS.
-    """
     caller_number = form.get("From")
     called_number = form.get("To")
 
@@ -177,16 +176,15 @@ def handle_missed_call(form):
     business, profile = get_business_by_number(called_number)
 
     if business:
-        print(f"✅ Business found: {business['business_name']} — Plan: {business.get('plan', 'starter')}")
+        print(f"✅ Business: {business['business_name']} — Plan: {business.get('plan','starter')}")
     else:
         print("⚠️ No business found — using default prompt")
 
     if caller_number:
         try:
-            # Check SMS limit
             if business and not check_sms_limit(business):
                 ai_reply = LIMIT_REACHED_MESSAGE
-                print(f"🚫 SMS limit reached — sending fallback message")
+                print("🚫 SMS limit reached — sending fallback")
             else:
                 ai_reply = get_ai_reply(
                     caller_number,
@@ -206,8 +204,9 @@ def handle_missed_call(form):
             )
             print(f"✅ SMS sent to {caller_number}")
 
-            # Increment counter only if under limit
-            if business and check_sms_limit(business):
+            # Log the outbound message
+            if business:
+                log_message(business["id"], caller_number, "outbound", ai_reply)
                 increment_sms_count(business)
 
         except Exception as e:

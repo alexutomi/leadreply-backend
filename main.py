@@ -3,10 +3,17 @@ import stripe
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+from twilio.rest import Client as TwilioClient
 from supabase import create_client
 from sms import handle_sms, handle_missed_call
 from provisioning import provision_new_business, create_business_account, create_agency_account
-from email_service import send_business_welcome, send_agency_welcome, _send_email
+from email_service import (
+    send_business_welcome,
+    send_agency_welcome,
+    send_payment_failed,
+    send_cancellation_email,
+    _send_email
+)
 
 app = FastAPI()
 
@@ -24,12 +31,15 @@ app.add_middleware(
 )
 
 # ── CREDENTIALS ───────────────────────────────────────────
-stripe.api_key             = os.environ.get("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET      = os.environ.get("STRIPE_WEBHOOK_SECRET")
-SUPABASE_URL               = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY       = os.environ.get("SUPABASE_SERVICE_KEY")
+stripe.api_key           = os.environ.get("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET    = os.environ.get("STRIPE_WEBHOOK_SECRET")
+SUPABASE_URL             = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY     = os.environ.get("SUPABASE_SERVICE_KEY")
+TWILIO_ACCOUNT_SID       = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN        = os.environ.get("TWILIO_AUTH_TOKEN")
 
-sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+sb     = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+twilio = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 
 # ── ROOT ──────────────────────────────────────────────────
@@ -75,21 +85,51 @@ async def create_agency(request: Request):
     return result
 
 
-# ── CANCELLATION ENDPOINTS ────────────────────────────────
+# ── TWILIO NUMBER RELEASE ─────────────────────────────────
+def release_twilio_number(twilio_number_sid: str, business_name: str):
+    """
+    Releases a Twilio phone number back to Twilio.
+    This stops the $1/mo charge immediately.
+    Skips fake TEST_MODE numbers gracefully.
+    """
+    if not twilio_number_sid:
+        print(f"⚠️ No Twilio SID for {business_name} — skipping release")
+        return False
+
+    if twilio_number_sid.startswith("TEST"):
+        print(f"🧪 [TEST MODE] Skipping number release for {business_name}")
+        return True
+
+    try:
+        twilio.incoming_phone_numbers(twilio_number_sid).delete()
+        print(f"✅ Twilio number released for {business_name} (SID: {twilio_number_sid})")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to release Twilio number for {business_name}: {e}")
+        return False
+
+
+# ── CANCELLATION ENDPOINT ─────────────────────────────────
 @app.post("/cancel-subscription")
 async def cancel_subscription(request: Request):
     """
-    Called from the business or agency dashboard.
-    Cancels the Stripe subscription and deactivates the account.
+    Called from the business or agency dashboard cancel button.
+    Steps:
+    1. Cancel Stripe subscription (at period end)
+    2. Release Twilio number if business account
+    3. Deactivate account in Supabase
+    4. Send cancellation confirmation email
     """
     body    = await request.json()
     user_id = body.get("user_id")
-    role    = body.get("role")  # "business" or "agency"
+    role    = body.get("role")
+    email   = body.get("email", "")
 
     if not user_id or not role:
         return {"success": False, "error": "user_id and role are required"}
 
     try:
+        # ── Fetch account record ──────────────────────────
         if role == "business":
             result = sb.table("businesses").select("*").eq("user_id", user_id).single().execute()
             record = result.data
@@ -102,57 +142,50 @@ async def cancel_subscription(request: Request):
         if not record:
             return {"success": False, "error": "Account not found"}
 
+        name          = record.get("business_name") or record.get("agency_name", "")
         stripe_sub_id = record.get("stripe_subscription_id")
+        owner_email   = record.get("owner_email") or record.get("agency_email") or email
 
-        # Cancel Stripe subscription at period end
+        # ── Step 1: Cancel Stripe subscription ───────────
         if stripe_sub_id and not stripe_sub_id.startswith("TEST"):
-            stripe.Subscription.modify(
-                stripe_sub_id,
-                cancel_at_period_end=True
-            )
-            print(f"✅ Stripe subscription set to cancel: {stripe_sub_id}")
+            try:
+                stripe.Subscription.modify(
+                    stripe_sub_id,
+                    cancel_at_period_end=True
+                )
+                print(f"✅ Stripe subscription set to cancel at period end: {stripe_sub_id}")
+            except Exception as e:
+                print(f"⚠️ Stripe cancellation error: {e}")
 
-        # Deactivate in database
+        # ── Step 2: Release Twilio number (businesses only) ──
+        if role == "business":
+            twilio_sid = record.get("twilio_number_sid")
+            biz_name   = record.get("business_name", "")
+            release_twilio_number(twilio_sid, biz_name)
+
+            # If agency — release all their client numbers
+        elif role == "agency":
+            agency_id = record.get("id")
+            clients_result = sb.table("businesses").select("*").eq("agency_id", agency_id).execute()
+            clients = clients_result.data or []
+            for client in clients:
+                release_twilio_number(
+                    client.get("twilio_number_sid"),
+                    client.get("business_name", "")
+                )
+                # Deactivate each client too
+                sb.table("businesses").update({"active": False}).eq("id", client["id"]).execute()
+            print(f"✅ Released {len(clients)} client numbers for agency {name}")
+
+        # ── Step 3: Deactivate account in Supabase ────────
         sb.table(table).update({"active": False}).eq("user_id", user_id).execute()
-        print(f"✅ Account deactivated for user: {user_id}")
+        print(f"✅ Account deactivated for {name}")
 
-        # Send cancellation confirmation email
-        email = record.get("agency_email") or record.get("business_phone", "")
-        name  = record.get("agency_name") or record.get("business_name", "")
+        # ── Step 4: Send cancellation email ───────────────
+        if owner_email:
+            send_cancellation_email(name=name, email=owner_email)
 
-        _send_email(
-            to_email=record.get("agency_email", "") or body.get("email", ""),
-            subject="Your LeadReply Subscription Has Been Cancelled",
-            html_content=f"""
-<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>
-body{{font-family:Arial,sans-serif;background:#f8fafc;margin:0;padding:0;}}
-.wrapper{{max-width:560px;margin:40px auto;background:white;border-radius:12px;overflow:hidden;}}
-.header{{background:#1e293b;padding:28px 32px;}}
-.header h1{{color:white;font-size:20px;margin:0;}}
-.body{{padding:32px;}}
-.text{{font-size:15px;color:#374151;line-height:1.7;margin-bottom:16px;}}
-.box{{background:#f1f5f9;border-radius:10px;padding:16px 20px;margin:20px 0;}}
-.footer{{background:#f8fafc;padding:20px 32px;text-align:center;border-top:1px solid #e2e8f0;font-size:12px;color:#94a3b8;}}
-</style></head><body>
-<div class="wrapper">
-  <div class="header"><h1>Subscription Cancelled</h1></div>
-  <div class="body">
-    <p class="text">Hi {name},</p>
-    <p class="text">Your LeadReply subscription has been successfully cancelled.</p>
-    <div class="box">
-      <p style="margin:0;font-size:14px;color:#374151;">Your service will remain active until the end of your current billing period. After that your dedicated number will be released and SMS automation will stop.</p>
-    </div>
-    <p class="text">We are sorry to see you go. If you ever want to restart your service you can sign up again at <a href="https://leadreplygroup.com" style="color:#2563eb;">leadreplygroup.com</a>.</p>
-    <p class="text">If you cancelled by mistake or have questions please email us at <a href="mailto:support@leadreplygroup.com" style="color:#2563eb;">support@leadreplygroup.com</a> and we will sort it out.</p>
-  </div>
-  <div class="footer"><p>2026 LeadReply Group · Houston, TX 77056</p></div>
-</div>
-</body></html>
-"""
-        )
-
-        return {"success": True, "message": "Subscription cancelled successfully"}
+        return {"success": True, "message": f"Subscription cancelled for {name}"}
 
     except Exception as e:
         print(f"❌ Cancellation error: {e}")
@@ -164,10 +197,10 @@ body{{font-family:Arial,sans-serif;background:#f8fafc;margin:0;padding:0;}}
 async def stripe_webhook(request: Request):
     """
     Handles Stripe events:
-    - invoice.payment_failed → deactivate account + send email
-    - customer.subscription.deleted → deactivate account
+    - invoice.payment_failed    → deactivate + send payment failed email
+    - customer.subscription.deleted → deactivate + release Twilio number
     """
-    payload   = await request.body()
+    payload    = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
     try:
@@ -192,93 +225,79 @@ async def stripe_webhook(request: Request):
     return {"status": "ok"}
 
 
+# ── PAYMENT FAILED HANDLER ────────────────────────────────
 async def handle_payment_failed(invoice):
-    """Deactivates account and emails client when payment fails."""
     customer_id = invoice.get("customer")
     if not customer_id:
         return
 
-    print(f"⚠️ Payment failed for customer: {customer_id}")
+    print(f"⚠️ Payment failed for Stripe customer: {customer_id}")
 
-    # Find business
+    # Check businesses first
     biz = sb.table("businesses").select("*").eq("stripe_customer_id", customer_id).execute()
     if biz.data:
         record = biz.data[0]
         sb.table("businesses").update({"active": False}).eq("id", record["id"]).execute()
         print(f"✅ Business deactivated: {record['business_name']}")
-        _send_payment_failed_email(record.get("business_name",""), customer_id)
+        owner_email = record.get("owner_email", "")
+        if owner_email:
+            send_payment_failed(name=record["business_name"], email=owner_email)
         return
 
-    # Find agency
+    # Check agencies
     agency = sb.table("agencies").select("*").eq("stripe_customer_id", customer_id).execute()
     if agency.data:
         record = agency.data[0]
         sb.table("agencies").update({"active": False}).eq("id", record["id"]).execute()
         print(f"✅ Agency deactivated: {record['agency_name']}")
-        _send_payment_failed_email(record.get("agency_name",""), customer_id)
+        agency_email = record.get("agency_email", "")
+        if agency_email:
+            send_payment_failed(name=record["agency_name"], email=agency_email)
 
 
+# ── SUBSCRIPTION DELETED HANDLER ──────────────────────────
 async def handle_subscription_deleted(subscription):
-    """Deactivates account when subscription is fully deleted."""
+    """
+    Fires when a subscription is fully deleted on Stripe.
+    Releases Twilio number and deactivates the account.
+    """
     customer_id = subscription.get("customer")
     if not customer_id:
         return
 
-    print(f"⚠️ Subscription deleted for customer: {customer_id}")
+    print(f"⚠️ Subscription deleted for Stripe customer: {customer_id}")
 
+    # Check businesses
     biz = sb.table("businesses").select("*").eq("stripe_customer_id", customer_id).execute()
     if biz.data:
-        sb.table("businesses").update({"active": False}).eq("stripe_customer_id", customer_id).execute()
-        print(f"✅ Business deactivated via subscription deletion")
+        record = biz.data[0]
+
+        # Release Twilio number
+        release_twilio_number(
+            record.get("twilio_number_sid"),
+            record.get("business_name", "")
+        )
+
+        # Deactivate account
+        sb.table("businesses").update({"active": False}).eq("id", record["id"]).execute()
+        print(f"✅ Business fully deactivated via subscription deletion: {record['business_name']}")
         return
 
+    # Check agencies
     agency = sb.table("agencies").select("*").eq("stripe_customer_id", customer_id).execute()
     if agency.data:
-        sb.table("agencies").update({"active": False}).eq("stripe_customer_id", customer_id).execute()
-        print(f"✅ Agency deactivated via subscription deletion")
+        record = agency.data[0]
+        agency_id = record["id"]
 
+        # Release all client numbers
+        clients = sb.table("businesses").select("*").eq("agency_id", agency_id).execute()
+        for client in (clients.data or []):
+            release_twilio_number(
+                client.get("twilio_number_sid"),
+                client.get("business_name", "")
+            )
+            sb.table("businesses").update({"active": False}).eq("id", client["id"]).execute()
 
-def _send_payment_failed_email(name: str, customer_id: str):
-    """Sends payment failure email to the client."""
-    try:
-        customer = stripe.Customer.retrieve(customer_id)
-        email = customer.get("email", "")
-        if not email:
-            return
-
-        _send_email(
-            to_email=email,
-            subject="Action Required — Payment Failed for LeadReply",
-            html_content=f"""
-<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>
-body{{font-family:Arial,sans-serif;background:#f8fafc;margin:0;padding:0;}}
-.wrapper{{max-width:560px;margin:40px auto;background:white;border-radius:12px;overflow:hidden;}}
-.header{{background:#dc2626;padding:28px 32px;}}
-.header h1{{color:white;font-size:20px;margin:0;}}
-.body{{padding:32px;}}
-.text{{font-size:15px;color:#374151;line-height:1.7;margin-bottom:16px;}}
-.box{{background:#fee2e2;border:1px solid #fecaca;border-radius:10px;padding:16px 20px;margin:20px 0;}}
-.btn{{display:block;background:#2563eb;color:white;text-align:center;padding:14px 24px;border-radius:10px;text-decoration:none;font-size:15px;font-weight:700;margin:24px 0;}}
-.footer{{background:#f8fafc;padding:20px 32px;text-align:center;border-top:1px solid #e2e8f0;font-size:12px;color:#94a3b8;}}
-</style></head><body>
-<div class="wrapper">
-  <div class="header"><h1>Payment Failed</h1></div>
-  <div class="body">
-    <p class="text">Hi {name},</p>
-    <p class="text">We were unable to process your LeadReply subscription payment. Your account has been temporarily paused.</p>
-    <div class="box">
-      <p style="margin:0;font-size:14px;color:#991b1b;font-weight:600;">Your missed call automation is currently inactive. Customers who call your LeadReply number will not receive auto-replies until your payment is resolved.</p>
-    </div>
-    <p class="text">To reactivate your account please update your payment method by logging into your dashboard.</p>
-    <a href="https://leadreplygroup.com/login.html" class="btn">Update Payment Method</a>
-    <p class="text">If you need help please email us at <a href="mailto:support@leadreplygroup.com" style="color:#2563eb;">support@leadreplygroup.com</a> and we will assist you immediately.</p>
-  </div>
-  <div class="footer"><p>2026 LeadReply Group · Houston, TX 77056</p></div>
-</div>
-</body></html>
-"""
-        )
-        print(f"✅ Payment failed email sent to {email}")
-    except Exception as e:
-        print(f"❌ Error sending payment failed email: {e}")
+        # Deactivate agency
+        sb.table("agencies").update({"active": False}).eq("id", agency_id).execute()
+        print(f"✅ Agency fully deactivated via subscription deletion: {record['agency_name']}")

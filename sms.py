@@ -3,6 +3,7 @@ from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 from supabase import create_client
 from model import get_ai_reply
+from email_service import send_reply_notification
 import os
 from datetime import date
 
@@ -34,6 +35,10 @@ LIMIT_REACHED_MESSAGE = (
 
 # ── LOOKUP BUSINESS BY TWILIO NUMBER ──────────────────────
 def get_business_by_number(twilio_number: str):
+    """
+    Finds the business that owns this Twilio number.
+    Returns (business, ai_profile) or (None, None).
+    """
     try:
         biz_result = sb.table("businesses") \
             .select("*") \
@@ -80,6 +85,11 @@ def log_message(business_id: str, caller_number: str, direction: str, message: s
 
 # ── CHECK AND RESET SMS LIMIT ─────────────────────────────
 def check_sms_limit(business: dict) -> bool:
+    """
+    Returns True if the business can still send SMS this month.
+    Returns False if they have hit their plan limit.
+    Also resets the counter if a new month has started.
+    """
     plan       = business.get("plan", "starter")
     sms_count  = business.get("sms_count", 0) or 0
     reset_date = business.get("sms_reset_date")
@@ -111,6 +121,7 @@ def check_sms_limit(business: dict) -> bool:
 
 # ── INCREMENT SMS COUNT ───────────────────────────────────
 def increment_sms_count(business: dict):
+    """Adds 1 to the business SMS counter after sending."""
     try:
         current = business.get("sms_count", 0) or 0
         sb.table("businesses") \
@@ -123,9 +134,16 @@ def increment_sms_count(business: dict):
 
 # ── HANDLE INBOUND SMS ────────────────────────────────────
 def handle_sms(form):
-    incoming_text = form.get("Body")
-    sender_number = form.get("From")
-    called_number = form.get("To")
+    """
+    Customer texts the Twilio number.
+    1. Logs the inbound message
+    2. Sends reply notification email to business owner
+    3. Generates AI reply (checking plan limit)
+    4. Logs the outbound reply
+    """
+    incoming_text = form.get("Body", "")
+    sender_number = form.get("From", "")
+    called_number = form.get("To", "")
 
     print(f"📩 Inbound SMS from {sender_number} to {called_number}: {incoming_text}")
 
@@ -133,12 +151,30 @@ def handle_sms(form):
 
     if business:
         print(f"✅ Business: {business['business_name']} — Plan: {business.get('plan','starter')}")
+
         # Log the inbound message
         log_message(business["id"], sender_number, "inbound", incoming_text)
+
+        # Send reply notification to business owner
+        owner_email = business.get("owner_email")
+        if owner_email:
+            try:
+                send_reply_notification(
+                    owner_email=owner_email,
+                    business_name=business["business_name"],
+                    caller_number=sender_number,
+                    message=incoming_text
+                )
+                print(f"📧 Reply notification sent to {owner_email}")
+            except Exception as e:
+                print(f"⚠️ Failed to send reply notification: {e}")
+        else:
+            print(f"⚠️ No owner_email found for {business['business_name']} — skipping notification")
     else:
         print("⚠️ No business found — using default prompt")
 
     try:
+        # Check SMS limit before generating AI reply
         if business and not check_sms_limit(business):
             ai_reply = LIMIT_REACHED_MESSAGE
             print("🚫 SMS limit reached — sending fallback")
@@ -168,8 +204,13 @@ def handle_sms(form):
 
 # ── HANDLE MISSED CALL ────────────────────────────────────
 def handle_missed_call(form):
-    caller_number = form.get("From")
-    called_number = form.get("To")
+    """
+    Customer calls and nobody answers.
+    Sends AI-powered auto-text to the caller.
+    Does NOT send a reply notification — this is an outbound auto-text, not a reply.
+    """
+    caller_number = form.get("From", "")
+    called_number = form.get("To", "")
 
     print(f"📞 Missed call from {caller_number} to {called_number}")
 

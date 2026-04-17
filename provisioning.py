@@ -37,7 +37,7 @@ AGENCY_CLIENT_LIMITS = {
 }
 
 # ── TWILIO NUMBER PURCHASE ────────────────────────────────
-def buy_twilio_number(business_phone):
+def buy_twilio_number(business_phone: str):
     if TEST_MODE:
         fake_number = "+15550000000"
         fake_sid    = "TEST_SID_123"
@@ -111,7 +111,7 @@ async def create_business_account(data: dict):
         # Step 3 — Twilio number
         twilio_number, twilio_sid = buy_twilio_number(business_phone)
 
-        # Step 4 — Save to businesses table
+        # Step 4 — Save to businesses table (including owner_email)
         biz_result = sb.table("businesses").insert({
             "user_id":                  user_id,
             "agency_id":                None,
@@ -124,6 +124,7 @@ async def create_business_account(data: dict):
             "active":                   True,
             "sms_count":                0,
             "plan":                     plan,
+            "owner_email":              email,
             "stripe_customer_id":       customer.id,
             "stripe_subscription_id":   subscription.id
         }).execute()
@@ -236,7 +237,7 @@ async def create_agency_account(data: dict):
 
 
 # ── PROVISION NUMBER FOR AGENCY CLIENT ────────────────────
-async def provision_new_business(business_name, business_phone, auto_reply_message=None):
+async def provision_new_business(business_name: str, business_phone: str, auto_reply_message: str = None):
     try:
         twilio_number, twilio_sid = buy_twilio_number(business_phone)
         return {

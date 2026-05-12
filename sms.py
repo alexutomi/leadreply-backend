@@ -43,7 +43,7 @@ def get_business_by_number(twilio_number: str):
         biz_result = sb.table("businesses") \
             .select("*") \
             .eq("twilio_number", twilio_number) \
-            .single() \
+            .maybe_single() \
             .execute()
 
         if not biz_result.data:
@@ -54,7 +54,7 @@ def get_business_by_number(twilio_number: str):
         profile_result = sb.table("ai_profiles") \
             .select("*") \
             .eq("business_id", business["id"]) \
-            .single() \
+            .maybe_single() \
             .execute()
 
         profile = profile_result.data if profile_result.data else None

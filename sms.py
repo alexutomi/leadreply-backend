@@ -8,9 +8,10 @@ import os
 from datetime import date
 
 # ── CREDENTIALS ───────────────────────────────────────────
-TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER  = os.environ.get("TWILIO_PHONE_NUMBER")
+TWILIO_ACCOUNT_SID           = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN            = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER          = os.environ.get("TWILIO_PHONE_NUMBER")
+TWILIO_MESSAGING_SERVICE_SID = os.environ.get("TWILIO_MESSAGING_SERVICE_SID")
 SUPABASE_URL         = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
@@ -235,16 +236,23 @@ def handle_missed_call(form):
 
             twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-            # Use business twilio number if found, else fall back to default
-            from_number = TWILIO_PHONE_NUMBER
-            if business and business.get("twilio_number"):
-                from_number = business["twilio_number"]
-
-            twilio_client.messages.create(
-                body=ai_reply,
-                from_=from_number,
-                to=caller_number
-            )
+            # Send via Messaging Service if available (inherits A2P approval)
+            # Fall back to direct number if Messaging Service not configured
+            if TWILIO_MESSAGING_SERVICE_SID:
+                twilio_client.messages.create(
+                    body=ai_reply,
+                    messaging_service_sid=TWILIO_MESSAGING_SERVICE_SID,
+                    to=caller_number
+                )
+            else:
+                from_number = TWILIO_PHONE_NUMBER
+                if business and business.get("twilio_number"):
+                    from_number = business["twilio_number"]
+                twilio_client.messages.create(
+                    body=ai_reply,
+                    from_=from_number,
+                    to=caller_number
+                )
             print(f"✅ SMS sent to {caller_number}")
 
             # Log the outbound message

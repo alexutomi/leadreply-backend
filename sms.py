@@ -43,21 +43,19 @@ def get_business_by_number(twilio_number: str):
         biz_result = sb.table("businesses") \
             .select("*") \
             .eq("twilio_number", twilio_number) \
-            .maybe_single() \
             .execute()
 
-        if not biz_result or not biz_result.data:
+        if not biz_result.data or len(biz_result.data) == 0:
             return None, None
 
-        business = biz_result.data
+        business = biz_result.data[0]
 
         profile_result = sb.table("ai_profiles") \
             .select("*") \
             .eq("business_id", business["id"]) \
-            .maybe_single() \
             .execute()
 
-        profile = profile_result.data if profile_result and profile_result.data else None
+        profile = profile_result.data[0] if profile_result.data and len(profile_result.data) > 0 else None
         return business, profile
 
     except Exception as e:

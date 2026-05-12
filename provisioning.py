@@ -15,7 +15,7 @@ stripe.api_key       = os.environ.get("STRIPE_SECRET_KEY")
 # ── TEST MODE ─────────────────────────────────────────────
 # True  = skip real Twilio purchase (for testing)
 # False = buy real Twilio number (for real clients)
-TEST_MODE = True
+TEST_MODE = False
 
 # ── SUPABASE CLIENT ───────────────────────────────────────
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)

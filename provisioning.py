@@ -7,6 +7,7 @@ from email_service import send_business_welcome, send_agency_welcome
 # ── CREDENTIALS ──────────────────────────────────────────
 TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_CAMPAIGN_SID  = os.environ.get("TWILIO_CAMPAIGN_SID")
 RENDER_URL           = os.environ.get("RENDER_URL")
 SUPABASE_URL         = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -15,7 +16,7 @@ stripe.api_key       = os.environ.get("STRIPE_SECRET_KEY")
 # ── TEST MODE ─────────────────────────────────────────────
 # True  = skip real Twilio purchase (for testing)
 # False = buy real Twilio number (for real clients)
-TEST_MODE = False
+TEST_MODE = True
 
 # ── SUPABASE CLIENT ───────────────────────────────────────
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -61,6 +62,17 @@ def buy_twilio_number(business_phone: str):
             voice_method="POST"
         )
         print(f"✅ Twilio number purchased: {new_number.phone_number}")
+
+        # Auto-register number to A2P campaign
+        if TWILIO_CAMPAIGN_SID:
+            try:
+                client.messaging.v1.services(TWILIO_CAMPAIGN_SID).phone_numbers.create(
+                    phone_number_sid=new_number.sid
+                )
+                print(f"✅ Number registered to A2P campaign: {new_number.phone_number}")
+            except Exception as camp_err:
+                print(f"⚠️ Could not register to A2P campaign: {camp_err}")
+
         return new_number.phone_number, new_number.sid
 
     except Exception as e:

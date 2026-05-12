@@ -234,7 +234,11 @@ def handle_missed_call(form):
                 print(f"🤖 Sending missed call SMS: {ai_reply}")
 
             twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            from_number = business["twilio_number"] if business else TWILIO_PHONE_NUMBER
+
+            # Use business twilio number if found, else fall back to default
+            from_number = TWILIO_PHONE_NUMBER
+            if business and business.get("twilio_number"):
+                from_number = business["twilio_number"]
 
             twilio_client.messages.create(
                 body=ai_reply,

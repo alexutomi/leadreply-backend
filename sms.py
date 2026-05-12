@@ -46,7 +46,7 @@ def get_business_by_number(twilio_number: str):
             .maybe_single() \
             .execute()
 
-        if not biz_result.data:
+        if not biz_result or not biz_result.data:
             return None, None
 
         business = biz_result.data
@@ -57,7 +57,7 @@ def get_business_by_number(twilio_number: str):
             .maybe_single() \
             .execute()
 
-        profile = profile_result.data if profile_result.data else None
+        profile = profile_result.data if profile_result and profile_result.data else None
         return business, profile
 
     except Exception as e:

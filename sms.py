@@ -172,6 +172,16 @@ def handle_sms(form):
     else:
         print("⚠️ No business found — using default prompt")
 
+    # Load conversation history so AI remembers previous exchanges
+    history = []
+    if business:
+        try:
+            history_result = sb.table("conversations")                 .select("direction,message,created_at")                 .eq("business_id", business["id"])                 .eq("caller_number", sender_number)                 .order("created_at", desc=False)                 .limit(10)                 .execute()
+            history = history_result.data or []
+            print(f"📚 Loaded {len(history)} history messages for {sender_number}")
+        except Exception as hist_err:
+            print(f"⚠️ Could not load history: {hist_err}")
+
     try:
         # Check SMS limit before generating AI reply
         if business and not check_sms_limit(business):
@@ -182,7 +192,8 @@ def handle_sms(form):
                 sender_number,
                 incoming_text,
                 profile=profile,
-                business=business
+                business=business,
+                history=history
             )
             print(f"🤖 AI reply: {ai_reply}")
             if business:

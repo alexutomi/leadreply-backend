@@ -35,7 +35,17 @@ PLAN_SMS_LIMITS = {
 AGENCY_CLIENT_LIMITS = {
     "agency_starter": 3,
     "agency_growth":  10,
-    "agency_pro":     999999,
+    "agency_pro":     50,
+}
+
+# ── PLAN PRICE IDS (LIVE MODE) ────────────────────────────
+PLAN_PRICE_IDS = {
+    "starter":        "price_1TX4vrRsDMOqpKTkwNGhIeir",
+    "growth":         "price_1TX4wrRsDMOqpKTkfmRP1RqQ",
+    "pro":            "price_1TX4y0RsDMOqpKTkV6ow5G9D",
+    "agency_starter": "price_1TX4z5RsDMOqpKTkFFZ3j1XR",
+    "agency_growth":  "price_1TX4zhRsDMOqpKTkcV5RmrLF",
+    "agency_pro":     "price_1TX50HRsDMOqpKTkS5S0YO1x",
 }
 
 # ── TWILIO NUMBER PURCHASE ────────────────────────────────
